@@ -2681,7 +2681,6 @@ static int s5c73m3_load_fw(struct v4l2_subdev *sd)
 	const struct firmware *fw;
 	char fw_path[20] = {0,};
 	char fw_path_in_data[25] = {0,};
-	u8 *buf = NULL;
 	int err = 0;
 	int txSize = 0;
 
@@ -2751,29 +2750,24 @@ static int s5c73m3_load_fw(struct v4l2_subdev *sd)
 		}
 
 		/*cam_dbg("start, size %d Bytes\n", fw->size);*/
-		buf = (u8 *)fw->data;
+		memcpy((void *) &data_memory, (void *) fw->data, fw->size);
 		fsize = fw->size;
 	}
 
 	txSize = 60*1024; /*60KB*/
 
-	if (state->fw_index != S5C73M3_IN_SYSTEM) {
-		err = s5c73m3_spi_write((char *)&data_memory,
-			fsize, txSize);
-		if (err < 0) {
-			cam_err("s5c73m3_spi_write falied\n");
-			goto out;
-		}
-	} else {
-		err = s5c73m3_spi_write((char *)buf, fsize, txSize);
+	err = s5c73m3_spi_write((char *)&data_memory,
+		fsize, txSize);
+	if (err < 0) {
+		cam_err("s5c73m3_spi_write falied\n");
+		goto out;
 	}
+
 out:
 	if (state->fw_index == S5C73M3_SD_CARD ||
 		state->fw_index == S5C73M3_IN_DATA) {
 		if (!IS_ERR(fp) && fp != NULL)
 			filp_close(fp, current->files);
-
-		vfree(buf);
 
 		set_fs(old_fs);
 	} else {
