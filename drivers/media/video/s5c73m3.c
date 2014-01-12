@@ -579,7 +579,6 @@ static int s5c73m3_get_sensor_fw_binary(struct v4l2_subdev *sd)
 	u16 read_val;
 	int i, rxSize;
 	int err = 0;
-	struct file *fp = NULL;
 	mm_segment_t old_fs;
 	long ret = 0;
 	char fw_path[25] = {0,};
@@ -730,17 +729,6 @@ retry:
 	set_fs(KERNEL_DS);
 
 	if (IntOriginalCRC == DataCRC) {
-		fp = filp_open(fw_path, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-		if (IS_ERR(fp) || fp == NULL) {
-			cam_err("failed to open %s, err %ld\n",
-				fw_path, PTR_ERR(fp));
-			err = -EINVAL;
-			goto out;
-		}
-
-		ret = vfs_write(fp, (char __user *)data_memory,
-			state->sensor_size, &fp->f_pos);
-
 		if (camfw_info[S5C73M3_SD_CARD].opened == 0) {
 			memcpy(state->phone_fw,
 				state->sensor_fw,
@@ -760,9 +748,6 @@ retry:
 			goto retry;
 		}
 	}
-
-	if (fp != NULL)
-		filp_close(fp, current->files);
 
 out:
 	set_fs(old_fs);
