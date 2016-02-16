@@ -10,6 +10,7 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/cpu_pm.h>
 #include <linux/cpuidle.h>
 #include <linux/io.h>
 #include <linux/suspend.h>
@@ -514,6 +515,40 @@ static struct sleep_save exynos4210_set_clksrc[] = {
 	{ .reg = EXYNOS4_CLKSRC_MASK_LCD1		, .val = 0x00001111, },
 };
 
+
+static DEFINE_SPINLOCK(online_lock);
+static int n_onlining_cpus_impl;
+
+static void add_onlininig_cpu(void)
+{
+	spin_lock(&online_lock);
+	++n_onlining_cpus_impl;
+	spin_unlock(&online_lock);
+}
+
+static void remove_onlininig_cpu(void)
+{
+	spin_lock(&online_lock);
+	--n_onlining_cpus_impl;
+	spin_unlock(&online_lock);
+}
+
+static void init_onlining_cpus(void)
+{
+	spin_lock(&online_lock);
+	n_onlining_cpus_impl = num_online_cpus();
+	spin_unlock(&online_lock);
+}
+
+static int is_only_onlining_cpu(void)
+{
+	int result;
+	spin_lock(&online_lock);
+	result = n_onlining_cpus_impl == 1;
+	spin_unlock(&online_lock);
+	return result;
+}
+
 static int exynos4_check_enter(void)
 {
 	unsigned int ret;
@@ -567,6 +602,8 @@ static int exynos4_enter_core0_aftr(struct cpuidle_device *dev,
 #endif
 
 	local_irq_disable();
+
+	cpu_pm_enter();
 
 	if (log_en)
 		pr_info("+++aftr\n");
@@ -630,6 +667,8 @@ early_wakeup:
 	if (log_en)
 		pr_info("---aftr\n");
 
+	cpu_pm_exit();
+
 	local_irq_enable();
 	idle_time = (after.tv_sec - before.tv_sec) * USEC_PER_SEC +
 		    (after.tv_usec - before.tv_usec);
@@ -663,12 +702,14 @@ static int exynos4_enter_core0_lpa(struct cpuidle_device *dev,
 #endif
 	local_irq_disable();
 
+	cpu_pm_enter();
+
 #if defined(CONFIG_INTERNAL_MODEM_IF) || defined(CONFIG_SAMSUNG_PHONE_TTY)
 	gpio_set_value(GPIO_PDA_ACTIVE, 0);
 #endif
 
 	if (log_en)
-		pr_info("+++lpa\n");
+		pr_debug("+++lpa\n");
 
 	do_gettimeofday(&before);
 
@@ -741,7 +782,7 @@ early_wakeup:
 			       ARRAY_SIZE(exynos4_lpa_save));
 
 #ifdef CONFIG_EXYNOS4_CPUFREQ
-	if ((exynos_result_of_asv > 1) && !soc_is_exynos4210()) {
+	if (!soc_is_exynos4210()) {
 		exynos4x12_set_abb_member(ABB_ARM, abb_val);
 		exynos4x12_set_abb_member(ABB_INT, abb_val_int);
 	}
@@ -758,10 +799,12 @@ early_wakeup:
 	do_gettimeofday(&after);
 
 	if (log_en)
-		pr_info("---lpa\n");
+		pr_debug("---lpa\n");
 #if defined(CONFIG_INTERNAL_MODEM_IF) || defined(CONFIG_SAMSUNG_PHONE_TTY)
 	gpio_set_value(GPIO_PDA_ACTIVE, 1);
 #endif
+
+	cpu_pm_exit();
 
 	local_irq_enable();
 	idle_time = (after.tv_sec - before.tv_sec) * USEC_PER_SEC +
@@ -831,7 +874,7 @@ static int exynos4_enter_idle(struct cpuidle_device *dev,
 		spin_lock(&idle_lock);
 		cpu_core |= (1 << cpu);
 
-		if ((cpu_core == 0x3) || (cpu_online(1) == 0)) {
+		if ((cpu_core == 0x3) || is_only_onlining_cpu()) {
 			old_div = __raw_readl(EXYNOS4_CLKDIV_CPU);
 			tmp = old_div;
 			tmp |= ((0x7 << 28) | (0x7 << 0));
@@ -849,7 +892,7 @@ static int exynos4_enter_idle(struct cpuidle_device *dev,
 
 		spin_lock(&idle_lock);
 
-		if ((cpu_core == 0x3) || (cpu_online(1) == 0)) {
+		if ((cpu_core == 0x3) || is_only_onlining_cpu()) {
 			__raw_writel(old_div, EXYNOS4_CLKDIV_CPU);
 
 			do {
@@ -905,7 +948,12 @@ static int exynos4_enter_lowpower(struct cpuidle_device *dev,
 	int ret;
 
 	/* This mode only can be entered when only Core0 is online */
-	if (num_online_cpus() != 1) {
+	if (use_clock_down == SW_CLK_DWN) {
+		enter_mode = is_only_onlining_cpu();
+	} else {
+		enter_mode = num_online_cpus() == 1;
+	}
+	if (!enter_mode) {
 		BUG_ON(!dev->safe_state);
 		new_state = dev->safe_state;
 	}
@@ -964,6 +1012,31 @@ static int exynos4_cpuidle_notifier_event(struct notifier_block *this,
 
 static struct notifier_block exynos4_cpuidle_notifier = {
 	.notifier_call = exynos4_cpuidle_notifier_event,
+};
+
+static int exynos4_cpuidle_cpu_notifier_event(struct notifier_block *this,
+					      unsigned long event,
+					      void *hcpu)
+{
+	switch (event) {
+	case CPU_UP_PREPARE:
+	case CPU_UP_PREPARE_FROZEN:
+		add_onlininig_cpu();
+		break;
+
+	case CPU_UP_CANCELED:
+	case CPU_UP_CANCELED_FROZEN:
+	case CPU_DEAD:
+	case CPU_DEAD_FROZEN:
+		remove_onlininig_cpu();
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block exynos4_cpuidle_cpu_notifier = {
+	.notifier_call = exynos4_cpuidle_cpu_notifier_event,
 };
 
 #ifdef CONFIG_EXYNOS4_ENABLE_CLOCK_DOWN
@@ -1138,7 +1211,16 @@ static int __init exynos4_init_cpuidle(void)
 		return -EINVAL;
 	}
 #endif
+
 	register_pm_notifier(&exynos4_cpuidle_notifier);
+
+	if (use_clock_down == SW_CLK_DWN) {
+		get_online_cpus();
+		init_onlining_cpus();
+		register_cpu_notifier(&exynos4_cpuidle_cpu_notifier);
+		put_online_cpus();
+	}
+
 	sys_pwr_conf_addr = (unsigned long)S5P_CENTRAL_SEQ_CONFIGURATION;
 
 	/* Save register value for SCU */

@@ -119,9 +119,13 @@ static struct mdm_platform_data mdm_platform_data = {
 	.peripheral_platform_device_ohci = &s5p_device_ohci,
 #endif
 	.ramdump_timeout_ms = 120000,
-#if defined(CONFIG_MACH_P4NOTE) && defined(CONFIG_QC_MODEM) \
+#if (defined(CONFIG_MACH_P4NOTE) || defined(CONFIG_MACH_SP7160LTE) || defined(CONFIG_MACH_TAB3)) && defined(CONFIG_QC_MODEM) \
 	&& defined(CONFIG_SIM_DETECT)
 	.sim_polarity = 0,
+#endif
+#if (defined(CONFIG_MACH_GC1_USA_VZW) || defined(CONFIG_TARGET_LOCALE_EUR)) \
+	&& defined(CONFIG_QC_MODEM) && defined(CONFIG_SIM_DETECT)
+	.sim_polarity = 1,
 #endif
 };
 
@@ -220,6 +224,17 @@ static int __init init_mdm_modem(void)
 								__func__, ret);
 		return ret;
 	}
+#endif
+#if defined(CONFIG_MACH_P4NOTE) && defined(CONFIG_QC_MODEM) \
+	&& defined(CONFIG_SIM_DETECT)
+	mdm_platform_data.sim_polarity = 0;
+#endif
+#if defined(CONFIG_MACH_KONALTE_USA_ATT) && defined(CONFIG_QC_MODEM) \
+        && defined(CONFIG_SIM_DETECT)
+	if (system_rev != 9 && system_rev >= 1)
+		mdm_platform_data.sim_polarity = 0;
+	else
+		mdm_platform_data.sim_polarity = 1;
 #endif
 	mdm_device.dev.platform_data = &mdm_platform_data;
 	ret = platform_device_register(&mdm_device);
