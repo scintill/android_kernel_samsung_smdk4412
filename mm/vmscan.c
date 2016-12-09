@@ -767,6 +767,7 @@ static noinline_for_stack void free_page_list(struct list_head *free_pages)
 	pagevec_free(&freed_pvec);
 }
 
+#pragma GCC optimize ("O0")
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
@@ -1017,6 +1018,7 @@ keep_lumpy:
 	count_vm_events(PGACTIVATE, pgactivate);
 	return nr_reclaimed;
 }
+#pragma GCC reset_options
 
 /*
  * Attempt to remove the specified page from its LRU.  Only take this page
