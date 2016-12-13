@@ -579,6 +579,7 @@ static int s5c73m3_get_sensor_fw_binary(struct v4l2_subdev *sd)
 	u16 read_val;
 	int i, rxSize;
 	int err = 0;
+	struct file *fp = NULL;
 	mm_segment_t old_fs;
 	long ret = 0;
 	char fw_path[25] = {0,};
@@ -729,6 +730,17 @@ retry:
 	set_fs(KERNEL_DS);
 
 	if (IntOriginalCRC == DataCRC) {
+		fp = filp_open(fw_path, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+		if (IS_ERR(fp) || fp == NULL) {
+			cam_err("failed to open %s, err %ld\n",
+				fw_path, PTR_ERR(fp));
+			err = -EINVAL;
+			goto out;
+		}
+
+		ret = vfs_write(fp, (char __user *)data_memory,
+			state->sensor_size, &fp->f_pos);
+
 		if (camfw_info[S5C73M3_SD_CARD].opened == 0) {
 			memcpy(state->phone_fw,
 				state->sensor_fw,
@@ -748,6 +760,9 @@ retry:
 			goto retry;
 		}
 	}
+
+	if (fp != NULL)
+		filp_close(fp, current->files);
 
 out:
 	set_fs(old_fs);
@@ -1049,14 +1064,17 @@ request_fw:
 				state->fw_index = S5C73M3_IN_DATA;
 			}
 		} else {
+			cam_dbg("can't open %s Ver. Firmware. so, download from F-ROM\n",
+				state->sensor_fw);
 			if (fw != NULL)
 				release_firmware(fw);
 
-			memcpy(state->phone_fw, state->sensor_fw, S5C73M3_FW_VER_LEN);
-			fw_requested = 0;
-			err = 0;
-			goto out;
-
+			retVal = s5c73m3_reset_module(sd, true);
+			CHECK_ERR(retVal);
+			retVal = s5c73m3_get_sensor_fw_binary(sd);
+			CHECK_ERR(retVal);
+			copied_fw_binary = 1;
+			goto request_fw;
 		}
 	}
 
@@ -1232,7 +1250,7 @@ static int s5c73m3_check_fw(struct v4l2_subdev *sd, int download)
 	/* retVal = 0 : Same Version
 	retVal < 0 : Phone Version is latest Version than sensorFW.
 	retVal > 0 : Sensor Version is latest version than phoenFW. */
-	if (retVal < 0 || download) {
+	if (retVal <= 0 || download) {
 		cam_dbg("Loading From PhoneFW......\n");
 
 		/* In case that there is no FW in phone and FW needs to be
@@ -1252,10 +1270,10 @@ static int s5c73m3_check_fw(struct v4l2_subdev *sd, int download)
 			CHECK_ERR(err);
 		}
 	} else {
-		cam_dbg("Loading From FROM......\n");
-		err = s5c73m3_reset_module(sd, false);
+		cam_dbg("Loading From SensorFW......\n");
+		err = s5c73m3_reset_module(sd, true);
 		CHECK_ERR(err);
-		err = s5c73m3_SPI_booting_by_ISP(sd);
+		err = s5c73m3_get_sensor_fw_binary(sd);
 		CHECK_ERR(err);
 	}
 
@@ -2663,6 +2681,7 @@ static int s5c73m3_load_fw(struct v4l2_subdev *sd)
 	const struct firmware *fw;
 	char fw_path[20] = {0,};
 	char fw_path_in_data[25] = {0,};
+	u8 *buf = NULL;
 	int err = 0;
 	int txSize = 0;
 
@@ -2732,24 +2751,29 @@ static int s5c73m3_load_fw(struct v4l2_subdev *sd)
 		}
 
 		/*cam_dbg("start, size %d Bytes\n", fw->size);*/
-		memcpy((void *) &data_memory, (void *) fw->data, fw->size);
+		buf = (u8 *)fw->data;
 		fsize = fw->size;
 	}
 
 	txSize = 60*1024; /*60KB*/
 
-	err = s5c73m3_spi_write((char *)&data_memory,
-		fsize, txSize);
-	if (err < 0) {
-		cam_err("s5c73m3_spi_write falied\n");
-		goto out;
+	if (state->fw_index != S5C73M3_IN_SYSTEM) {
+		err = s5c73m3_spi_write((char *)&data_memory,
+			fsize, txSize);
+		if (err < 0) {
+			cam_err("s5c73m3_spi_write falied\n");
+			goto out;
+		}
+	} else {
+		err = s5c73m3_spi_write((char *)buf, fsize, txSize);
 	}
-
 out:
 	if (state->fw_index == S5C73M3_SD_CARD ||
 		state->fw_index == S5C73M3_IN_DATA) {
 		if (!IS_ERR(fp) && fp != NULL)
 			filp_close(fp, current->files);
+
+		vfree(buf);
 
 		set_fs(old_fs);
 	} else {
@@ -3488,14 +3512,25 @@ static int s5c73m3_init(struct v4l2_subdev *sd, u32 val)
 	err = s5c73m3_i2c_check_status_with_CRC(sd);
 	if (err < 0) {
 		cam_err("ISP is not ready. retry loading fw!!\n");
+		/* retry */
+		retVal = s5c73m3_check_fw_date(sd);
 
-		err = s5c73m3_check_fw(sd, 0);
-		if (err < 0) {
-			cam_dbg("isp.bad_fw is true\n");
-			state->isp.bad_fw = 1;
+		/* retVal = 0 : Same Version
+		retVal < 0 : Phone Version is latest Version than sensorFW.
+		retVal > 0 : Sensor Version is latest version than phoenFW. */
+		if (retVal <= 0) {
+			cam_dbg("Loading From PhoneFW......\n");
+			err = s5c73m3_reset_module(sd, false);
+			CHECK_ERR(err);
+			err = s5c73m3_SPI_booting(sd);
+			CHECK_ERR(err);
+		} else {
+			cam_dbg("Loading From SensorFW......\n");
+			err = s5c73m3_reset_module(sd, true);
+			CHECK_ERR(err);
+			err = s5c73m3_get_sensor_fw_binary(sd);
+			CHECK_ERR(err);
 		}
-
-		CHECK_ERR(err);
 	}
 
 	state->isp.bad_fw = 0;
